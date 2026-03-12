@@ -121,6 +121,108 @@ class TestFormatSize(unittest.TestCase):
         self.assertEqual(sud.format_size(0), "0 kB")
 
 
+class TestCalculateUsagePercent(unittest.TestCase):
+    """Tests for calculate_usage_percent function."""
+
+    def test_usage_percent_half(self):
+        """Test 50% usage."""
+        swap_info = {
+            "total_kb": 8388608,
+            "used_kb": 4194304,
+            "free_kb": 4194304,
+        }
+        result = sud.calculate_usage_percent(swap_info)
+        self.assertEqual(result, 50.0)
+
+    def test_usage_percent_quarter(self):
+        """Test 25% usage."""
+        swap_info = {
+            "total_kb": 8388608,
+            "used_kb": 2097152,
+            "free_kb": 6291456,
+        }
+        result = sud.calculate_usage_percent(swap_info)
+        self.assertEqual(result, 25.0)
+
+    def test_usage_percent_zero(self):
+        """Test 0% usage."""
+        swap_info = {
+            "total_kb": 8388608,
+            "used_kb": 0,
+            "free_kb": 8388608,
+        }
+        result = sud.calculate_usage_percent(swap_info)
+        self.assertEqual(result, 0.0)
+
+    def test_usage_percent_full(self):
+        """Test 100% usage."""
+        swap_info = {
+            "total_kb": 8388608,
+            "used_kb": 8388608,
+            "free_kb": 0,
+        }
+        result = sud.calculate_usage_percent(swap_info)
+        self.assertEqual(result, 100.0)
+
+    def test_usage_percent_zero_total(self):
+        """Test handling of zero total swap."""
+        swap_info = {
+            "total_kb": 0,
+            "used_kb": 0,
+            "free_kb": 0,
+        }
+        result = sud.calculate_usage_percent(swap_info)
+        self.assertEqual(result, 0.0)
+
+
+class TestCheckThreshold(unittest.TestCase):
+    """Tests for check_threshold function."""
+
+    def test_threshold_not_exceeded(self):
+        """Test when usage is below threshold."""
+        swap_info = {
+            "total_kb": 8388608,
+            "used_kb": 2097152,
+            "free_kb": 6291456,
+        }
+        exceeded, percent = sud.check_threshold(swap_info, 50.0)
+        self.assertFalse(exceeded)
+        self.assertEqual(percent, 25.0)
+
+    def test_threshold_exceeded(self):
+        """Test when usage exceeds threshold."""
+        swap_info = {
+            "total_kb": 8388608,
+            "used_kb": 6815744,
+            "free_kb": 1572864,
+        }
+        exceeded, percent = sud.check_threshold(swap_info, 75.0)
+        self.assertTrue(exceeded)
+        self.assertEqual(percent, 81.25)
+
+    def test_threshold_exactly_at_boundary(self):
+        """Test when usage is exactly at threshold."""
+        swap_info = {
+            "total_kb": 8388608,
+            "used_kb": 6710886,
+            "free_kb": 1677722,
+        }
+        exceeded, percent = sud.check_threshold(swap_info, 80.0)
+        self.assertFalse(exceeded)
+        self.assertAlmostEqual(percent, 79.999995, places=5)
+
+    def test_threshold_just_below_boundary(self):
+        """Test when usage is just below threshold."""
+        swap_info = {
+            "total_kb": 8388608,
+            "used_kb": 6710885,
+            "free_kb": 1677723,
+        }
+        exceeded, percent = sud.check_threshold(swap_info, 80.0)
+        self.assertFalse(exceeded)
+        self.assertLess(percent, 80.0)
+
+
 class TestCalculateDelta(unittest.TestCase):
     """Tests for calculate_delta function."""
 
@@ -303,6 +405,128 @@ class TestDisplaySnapshot(unittest.TestCase):
         self.assertIn("Delta from last reading", output)
         self.assertIn("Used change:", output)
         self.assertIn("+", output)
+
+    def test_display_snapshot_with_threshold_no_alert(self):
+        """Test snapshot display with threshold but no alert."""
+        swap_info = {
+            "total_kb": 8388608,
+            "used_kb": 2097152,
+            "free_kb": 6291456,
+        }
+
+        with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+            sud.display_snapshot(swap_info, threshold=80.0, alert_triggered=False, usage_percent=25.0)
+            output = mock_stdout.getvalue()
+
+        self.assertIn("Usage:", output)
+        self.assertIn("25.0%", output)
+        self.assertIn("threshold: 80%", output)
+        self.assertNotIn("ALERT", output)
+
+    def test_display_snapshot_with_threshold_alert(self):
+        """Test snapshot display with threshold and alert triggered."""
+        swap_info = {
+            "total_kb": 8388608,
+            "used_kb": 6815744,
+            "free_kb": 1572864,
+        }
+
+        with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+            sud.display_snapshot(swap_info, threshold=75.0, alert_triggered=True, usage_percent=81.25)
+            output = mock_stdout.getvalue()
+
+        self.assertIn("Usage:", output)
+        self.assertIn("81.2%", output)
+        self.assertIn("ALERT", output)
+        self.assertIn("exceeds 75%", output)
+
+
+class TestShowSummaryWithAlerts(unittest.TestCase):
+    """Tests for show_summary with alert data."""
+
+    def test_show_summary_alert_count(self):
+        """Test summary shows alert count when present."""
+        history_data = [
+            {
+                "timestamp": "2026-03-12T14:30:00",
+                "total_kb": 8388608,
+                "used_kb": 1048576,
+                "free_kb": 7340032,
+                "usage_percent": 12.5,
+                "alert_triggered": False,
+            },
+            {
+                "timestamp": "2026-03-12T14:35:00",
+                "total_kb": 8388608,
+                "used_kb": 6815744,
+                "free_kb": 1572864,
+                "usage_percent": 81.25,
+                "alert_triggered": True,
+            },
+            {
+                "timestamp": "2026-03-12T14:40:00",
+                "total_kb": 8388608,
+                "used_kb": 7340032,
+                "free_kb": 1048576,
+                "usage_percent": 87.5,
+                "alert_triggered": True,
+            },
+        ]
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(history_data, f)
+            temp_path = f.name
+
+        try:
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                sud.show_summary(temp_path)
+                output = mock_stdout.getvalue()
+
+            self.assertIn("Alerts triggered:", output)
+            self.assertIn("2 out of 3", output)
+        finally:
+            os.unlink(temp_path)
+
+
+class TestShowHistoryWithAlerts(unittest.TestCase):
+    """Tests for show_history with alert data."""
+
+    def test_show_history_alert_marker(self):
+        """Test history shows alert marker when triggered."""
+        history_data = [
+            {
+                "timestamp": "2026-03-12T14:30:00",
+                "total_kb": 8388608,
+                "used_kb": 1048576,
+                "free_kb": 7340032,
+                "usage_percent": 12.5,
+                "alert_triggered": False,
+                "delta": {"used_delta": 0},
+            },
+            {
+                "timestamp": "2026-03-12T14:35:00",
+                "total_kb": 8388608,
+                "used_kb": 6815744,
+                "free_kb": 1572864,
+                "usage_percent": 81.25,
+                "alert_triggered": True,
+                "delta": {"used_delta": 5767168},
+            },
+        ]
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(history_data, f)
+            temp_path = f.name
+
+        try:
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                sud.show_history(temp_path, limit=10)
+                output = mock_stdout.getvalue()
+
+            self.assertIn("81.2%", output)
+            self.assertIn("⚠", output)
+        finally:
+            os.unlink(temp_path)
 
 
 if __name__ == "__main__":
