@@ -20,6 +20,9 @@ That's it. Runs every 5 seconds until you hit Ctrl+C. Data goes to `swap_history
 # Custom interval (10 seconds)
 python3 swap_usage_delta.py -i 10
 
+# Alert when swap usage exceeds 75%
+python3 swap_usage_delta.py --threshold 75
+
 # Just grab one reading
 python3 swap_usage_delta.py --once
 
@@ -38,9 +41,21 @@ python3 swap_usage_delta.py --history -n 20
   Swap Used:   1.23 GB
   Swap Free:   6.77 GB
   Swap Cached: 512 MB
+  Usage:       15.4% (threshold: 75%)
   --- Delta from last reading ---
   Used change: +45.50 MB
   Free change: -45.50 MB
+```
+
+When usage exceeds the threshold:
+
+```
+[2026-03-12 14:35:10]
+  Swap Total:  8.00 GB
+  Swap Used:   6.50 GB
+  Swap Free:   1.50 GB
+  Usage:       81.2% (threshold: 75%)
+  ⚠ ALERT: Swap usage exceeds 75% threshold!
 ```
 
 The delta tells you if swap is growing or shrinking since the last check. Positive used delta = bad news, probably.
@@ -56,7 +71,9 @@ History is stored as JSON. You can parse it yourself if you want graphs or whate
   "used_kb": 1289748,
   "free_kb": 7098860,
   "cached_kb": 524288,
-  "delta": { ... }
+  "delta": { ... },
+  "usage_percent": 15.4,
+  "alert_triggered": false
 }
 ```
 

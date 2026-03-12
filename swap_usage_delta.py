@@ -18,6 +18,7 @@ from pathlib import Path
 PROC_MEMINFO = "/proc/meminfo"
 DEFAULT_DATA_FILE = "swap_history.json"
 DEFAULT_INTERVAL = 5
+DEFAULT_THRESHOLD = 80.0
 
 
 def parse_meminfo():
@@ -43,11 +44,11 @@ def parse_meminfo():
     except PermissionError:
         print(f"Error: Permission denied reading {PROC_MEMINFO}", file=sys.stderr)
         sys.exit(1)
-    
+
     if "total_kb" not in swap_info or "free_kb" not in swap_info:
         print("Error: Could not find swap information in meminfo", file=sys.stderr)
         sys.exit(1)
-    
+
     swap_info["used_kb"] = swap_info["total_kb"] - swap_info["free_kb"]
     return swap_info
 
@@ -60,6 +61,19 @@ def format_size(kb):
         return f"{kb / 1024:.2f} MB"
     else:
         return f"{kb / (1024 * 1024):.2f} GB"
+
+
+def calculate_usage_percent(swap_info):
+    """Calculate swap usage percentage."""
+    if swap_info["total_kb"] == 0:
+        return 0.0
+    return (swap_info["used_kb"] / swap_info["total_kb"]) * 100
+
+
+def check_threshold(swap_info, threshold_percent):
+    """Check if swap usage exceeds threshold. Returns (exceeded, usage_percent)."""
+    usage_percent = calculate_usage_percent(swap_info)
+    return usage_percent >= threshold_percent, usage_percent
 
 
 def load_history(data_file):
@@ -97,7 +111,7 @@ def calculate_delta(current, previous):
     }
 
 
-def display_snapshot(swap_info, delta=None):
+def display_snapshot(swap_info, delta=None, threshold=None, alert_triggered=False, usage_percent=0.0):
     """Display a formatted snapshot of current swap usage."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n[{timestamp}]")
@@ -106,7 +120,12 @@ def display_snapshot(swap_info, delta=None):
     print(f"  Swap Free:   {format_size(swap_info['free_kb'])}")
     if "cached_kb" in swap_info:
         print(f"  Swap Cached: {format_size(swap_info['cached_kb'])}")
-    
+
+    if threshold is not None:
+        print(f"  Usage:       {usage_percent:.1f}% (threshold: {threshold:.0f}%)")
+        if alert_triggered:
+            print(f"  ⚠ ALERT: Swap usage exceeds {threshold:.0f}% threshold!")
+
     if delta:
         print("  --- Delta from last reading ---")
         used_sign = "+" if delta["used_delta"] > 0 else ""
@@ -120,30 +139,37 @@ def display_snapshot(swap_info, delta=None):
             print(f"  Cached change: {cached_sign}{format_size(delta['cached_delta'])}")
 
 
-def run_monitor(interval, data_file, max_entries):
+def run_monitor(interval, data_file, max_entries, threshold=None):
     """Run continuous monitoring loop."""
     history = load_history(data_file)
     previous = history[-1] if history else None
-    
+
     print(f"Monitoring swap every {interval} seconds. Press Ctrl+C to stop.")
+    if threshold:
+        print(f"Alert threshold: {threshold}%")
     print(f"Data file: {data_file}")
-    
+
     running = True
-    
+
     def signal_handler(sig, frame):
         nonlocal running
         running = False
         print("\nStopping monitor...")
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     while running:
         swap_info = parse_meminfo()
         delta = calculate_delta(swap_info, previous)
-        
-        display_snapshot(swap_info, delta)
-        
+
+        alert_triggered = False
+        usage_percent = 0.0
+        if threshold is not None:
+            alert_triggered, usage_percent = check_threshold(swap_info, threshold)
+
+        display_snapshot(swap_info, delta, threshold, alert_triggered, usage_percent)
+
         entry = {
             "timestamp": datetime.now().isoformat(),
             "total_kb": swap_info["total_kb"],
@@ -151,33 +177,35 @@ def run_monitor(interval, data_file, max_entries):
             "free_kb": swap_info["free_kb"],
             "cached_kb": swap_info.get("cached_kb", 0),
             "delta": delta,
+            "usage_percent": usage_percent,
+            "alert_triggered": alert_triggered,
         }
         history.append(entry)
-        
+
         if max_entries and len(history) > max_entries:
             history = history[-max_entries:]
-        
+
         save_history(data_file, history)
         previous = swap_info
-        
+
         if running:
             time.sleep(interval)
-    
+
     print(f"Final history saved to {data_file} ({len(history)} entries)")
 
 
 def show_summary(data_file):
     """Show summary statistics from history file."""
     history = load_history(data_file)
-    
+
     if not history:
         print("No history data found. Run monitor first.")
         return
-    
+
     print(f"Swap Usage Summary from {data_file}")
     print("=" * 50)
     print(f"Total entries: {len(history)}")
-    
+
     if len(history) >= 2:
         first = history[0]
         last = history[-1]
@@ -186,39 +214,45 @@ def show_summary(data_file):
         duration = last_time - first_time
         print(f"Time span: {first_time.strftime('%Y-%m-%d %H:%M:%S')} to {last_time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Duration: {duration}")
-    
+
     used_values = [entry["used_kb"] for entry in history]
     min_used = min(used_values)
     max_used = max(used_values)
     avg_used = sum(used_values) / len(used_values)
-    
+
     print(f"\nSwap Used Statistics:")
     print(f"  Minimum: {format_size(min_used)}")
     print(f"  Maximum: {format_size(max_used)}")
     print(f"  Average: {format_size(int(avg_used))}")
     print(f"  Range:   {format_size(max_used - min_used)}")
-    
+
     if len(history) >= 2:
         total_change = last["used_kb"] - first["used_kb"]
         sign = "+" if total_change > 0 else ""
         print(f"\nNet change over period: {sign}{format_size(total_change)}")
 
+    alert_count = sum(1 for entry in history if entry.get("alert_triggered", False))
+    if alert_count > 0:
+        print(f"\nAlerts triggered: {alert_count} out of {len(history)} readings ({100*alert_count/len(history):.1f}%)")
+
 
 def show_history(data_file, limit=10):
     """Show recent history entries."""
     history = load_history(data_file)
-    
+
     if not history:
         print("No history data found. Run monitor first.")
         return
-    
+
     entries = history[-limit:] if limit else history
     print(f"Recent swap usage history (last {len(entries)} entries):")
     print("-" * 70)
-    
+
     for entry in entries:
         ts = datetime.fromisoformat(entry["timestamp"]).strftime("%H:%M:%S")
         used = format_size(entry["used_kb"])
+        usage_pct = entry.get("usage_percent", 0.0)
+        alert = entry.get("alert_triggered", False)
         delta = entry.get("delta", {})
         used_delta = delta.get("used_delta", 0)
         if used_delta != 0:
@@ -226,7 +260,8 @@ def show_history(data_file, limit=10):
             delta_str = f" ({sign}{format_size(used_delta)})"
         else:
             delta_str = ""
-        print(f"  {ts} - Used: {used}{delta_str}")
+        alert_marker = " ⚠" if alert else ""
+        print(f"  {ts} - Used: {used} ({usage_pct:.1f}%){alert_marker}{delta_str}")
 
 
 def main():
@@ -237,6 +272,7 @@ def main():
 Examples:
   %(prog)s                    # Monitor with default 5s interval
   %(prog)s -i 10              # Monitor with 10s interval
+  %(prog)s --threshold 75     # Alert when usage exceeds 75%
   %(prog)s --summary          # Show summary from history file
   %(prog)s --history -n 20    # Show last 20 history entries
         """
@@ -260,6 +296,12 @@ Examples:
         help="Maximum history entries to keep (default: 1000)"
     )
     parser.add_argument(
+        "-t", "--threshold",
+        type=float,
+        default=None,
+        help=f"Alert threshold percentage (e.g., 80 for 80%%)"
+    )
+    parser.add_argument(
         "--summary",
         action="store_true",
         help="Show summary statistics from history file"
@@ -274,9 +316,9 @@ Examples:
         action="store_true",
         help="Take a single reading and exit"
     )
-    
+
     args = parser.parse_args()
-    
+
     if args.summary:
         show_summary(args.file)
     elif args.history:
@@ -286,9 +328,13 @@ Examples:
         history = load_history(args.file)
         previous = history[-1] if history else None
         delta = calculate_delta(swap_info, previous)
-        display_snapshot(swap_info, delta)
+        usage_percent = calculate_usage_percent(swap_info)
+        alert_triggered = False
+        if args.threshold:
+            alert_triggered, _ = check_threshold(swap_info, args.threshold)
+        display_snapshot(swap_info, delta, args.threshold, alert_triggered, usage_percent)
     else:
-        run_monitor(args.interval, args.file, args.max_entries)
+        run_monitor(args.interval, args.file, args.max_entries, args.threshold)
 
 
 if __name__ == "__main__":
